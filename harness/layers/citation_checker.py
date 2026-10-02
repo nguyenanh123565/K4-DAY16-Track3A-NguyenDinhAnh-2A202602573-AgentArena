@@ -59,6 +59,8 @@ Xem `harness/middleware.py` để biết thứ tự các hook.
 
 from __future__ import annotations
 
+from arena.scorer import _norm, _norm_lines, _supports
+
 from harness.middleware import Middleware
 
 
@@ -80,4 +82,24 @@ class CitationChecker(Middleware):
         #     Đổi doc_id sang nó, GIỮ NGUYÊN text.
         #  4. Không tìm được nguồn nào -> để `critic` xử lý, đừng bịa doc_id.
         #  5. Cập nhật report["citations"] = danh sách doc_id đã sắp xếp.
-        return report  # <- mặc định KHÔNG LÀM GÌ: agent vẫn chạy được
+        claims = report.get("claims")
+        if not isinstance(claims, list) or not claims or ctx.corpus is None:
+            return report
+        observed = ctx.observed_text
+        for claim in claims:
+            if not isinstance(claim, dict) or not isinstance(claim.get("text"), str):
+                continue
+            text = _norm(claim["text"])
+            doc_id = claim.get("doc_id")
+            cited = ctx.corpus.get(doc_id) if isinstance(doc_id, str) else None
+            if cited is not None and _supports(_norm_lines(cited.body), text):
+                continue
+            for doc in ctx.corpus.docs:
+                if doc.body and doc.body in observed and _supports(_norm_lines(doc.body), text):
+                    claim["doc_id"] = doc.doc_id
+                    break
+        report["citations"] = sorted({
+            c["doc_id"] for c in claims if isinstance(c, dict)
+            and isinstance(c.get("doc_id"), str) and c["doc_id"]
+        })
+        return report

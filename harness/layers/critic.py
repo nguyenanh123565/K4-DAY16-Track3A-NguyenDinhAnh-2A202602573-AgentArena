@@ -70,6 +70,8 @@ Xem `harness/middleware.py` để biết thứ tự các hook.
 
 from __future__ import annotations
 
+from arena.scorer import _norm, _norm_lines, _supports
+
 from harness.middleware import Middleware
 
 
@@ -91,4 +93,51 @@ class Critic(Middleware):
         #     claims = [], citations = [], và viết lại "answer" nói rõ là
         #     không đủ căn cứ.
         #  6. Cập nhật report["citations"] cho khớp với claims còn lại.
-        return report  # <- mặc định KHÔNG LÀM GÌ: agent vẫn chạy được
+        claims = report.get("claims")
+        if not isinstance(claims, list) or not claims:
+            return report
+        observed = ctx.observed_text
+        docs = ctx.corpus.docs if ctx.corpus is not None else []
+        kept = []
+        for claim in claims:
+            if not isinstance(claim, dict):
+                continue
+            text = claim.get("text")
+            if not isinstance(text, str) or not text.strip():
+                continue
+            if text in observed and (
+                not docs or any(_supports(_norm_lines(d.body), _norm(text)) for d in docs)
+            ):
+                kept.append(claim)
+                continue
+            split = self._split(text, observed, docs)
+            if split:
+                kept.extend({**claim, "text": part, "doc_id": doc_id} for part, doc_id in split)
+                report["abstain"] = True
+        report["claims"] = kept
+        report["citations"] = sorted({
+            c["doc_id"] for c in kept
+            if isinstance(c.get("doc_id"), str) and c["doc_id"]
+        })
+        if not kept:
+            report["abstain"] = True
+            report["answer"] = "Không đủ căn cứ trong bằng chứng đã quan sát để trả lời."
+        return report
+
+    @staticmethod
+    def _split(text, observed, docs):
+        # Each part remains a substring of the model's claim, never corpus text.
+        docs = [d for d in docs if d.body and d.body in observed]
+        join = " và "
+        position = text.find(join)
+        while position > 0:
+            left, right = text[:position].strip(), text[position + len(join):].strip()
+            if left and right and left in observed and right in observed:
+                left_docs = [d for d in docs if _supports(_norm_lines(d.body), _norm(left))]
+                right_docs = [d for d in docs if _supports(_norm_lines(d.body), _norm(right))]
+                for first in left_docs:
+                    for second in right_docs:
+                        if first.doc_id != second.doc_id:
+                            return [(left, first.doc_id), (right, second.doc_id)]
+            position = text.find(join, position + 1)
+        return None
